@@ -14,31 +14,66 @@ use bincode::config;
 #[cfg(feature = "storage")]
 use serde_json;
 #[cfg(feature = "storage")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
+#[cfg(feature = "storage")]
+use std::sync::Arc;
+#[cfg(feature = "storage")]
+use std::collections::HashMap;
+#[cfg(feature = "storage")]
+use parking_lot::Mutex;
+#[cfg(feature = "storage")]
+use once_cell::sync::Lazy;
 
 #[cfg(feature = "storage")]
 
 const VECTORS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("vectors");
 const METADATA_TABLE: TableDefinition<&str, &str> = TableDefinition::new("metadata");
 
+// Global database connection pool to allow multiple VectorDB instances
+// to share the same underlying database file
+static DB_POOL: Lazy<Mutex<HashMap<PathBuf, Arc<Database>>>> = Lazy::new(|| {
+    Mutex::new(HashMap::new())
+});
+
 /// Storage backend for vector database
 pub struct VectorStorage {
-    db: Database,
+    db: Arc<Database>,
     dimensions: usize,
 }
 
 impl VectorStorage {
     /// Create or open a vector storage at the given path
+    ///
+    /// This method uses a global connection pool to allow multiple VectorDB
+    /// instances to share the same underlying database file, fixing the
+    /// "Database already open. Cannot acquire lock" error.
     pub fn new<P: AsRef<Path>>(path: P, dimensions: usize) -> Result<Self> {
-        let db = Database::create(path)?;
+        let path_buf = path.as_ref().canonicalize()
+            .unwrap_or_else(|_| path.as_ref().to_path_buf());
 
-        // Initialize tables
-        let write_txn = db.begin_write()?;
-        {
-            let _ = write_txn.open_table(VECTORS_TABLE)?;
-            let _ = write_txn.open_table(METADATA_TABLE)?;
-        }
-        write_txn.commit()?;
+        // Check if we already have a Database instance for this path
+        let db = {
+            let mut pool = DB_POOL.lock();
+
+            if let Some(existing_db) = pool.get(&path_buf) {
+                // Reuse existing database connection
+                Arc::clone(existing_db)
+            } else {
+                // Create new database and add to pool
+                let new_db = Arc::new(Database::create(&path_buf)?);
+
+                // Initialize tables
+                let write_txn = new_db.begin_write()?;
+                {
+                    let _ = write_txn.open_table(VECTORS_TABLE)?;
+                    let _ = write_txn.open_table(METADATA_TABLE)?;
+                }
+                write_txn.commit()?;
+
+                pool.insert(path_buf, Arc::clone(&new_db));
+                new_db
+            }
+        };
 
         Ok(Self { db, dimensions })
     }
@@ -266,6 +301,51 @@ mod tests {
         let deleted = storage.delete("test1")?;
         assert!(deleted);
         assert_eq!(storage.len()?, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_instances_same_path() -> Result<()> {
+        // This test verifies the fix for the database locking bug
+        // Multiple VectorStorage instances should be able to share the same database file
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("shared.db");
+
+        // Create first instance
+        let storage1 = VectorStorage::new(&db_path, 3)?;
+
+        // Insert data with first instance
+        storage1.insert(&VectorEntry {
+            id: Some("test1".to_string()),
+            vector: vec![1.0, 2.0, 3.0],
+            metadata: None,
+        })?;
+
+        // Create second instance with SAME path - this should NOT fail
+        let storage2 = VectorStorage::new(&db_path, 3)?;
+
+        // Both instances should see the same data
+        assert_eq!(storage1.len()?, 1);
+        assert_eq!(storage2.len()?, 1);
+
+        // Insert with second instance
+        storage2.insert(&VectorEntry {
+            id: Some("test2".to_string()),
+            vector: vec![4.0, 5.0, 6.0],
+            metadata: None,
+        })?;
+
+        // Both instances should see both records
+        assert_eq!(storage1.len()?, 2);
+        assert_eq!(storage2.len()?, 2);
+
+        // Verify data integrity
+        let retrieved1 = storage1.get("test1")?;
+        assert!(retrieved1.is_some());
+
+        let retrieved2 = storage2.get("test2")?;
+        assert!(retrieved2.is_some());
 
         Ok(())
     }

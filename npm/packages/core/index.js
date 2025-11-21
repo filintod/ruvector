@@ -3,15 +3,15 @@ const { platform, arch } = process;
 // Platform mapping
 const platformMap = {
   'linux': {
-    'x64': '@ruvector/core-linux-x64',
-    'arm64': '@ruvector/core-linux-arm64'
+    'x64': 'ruvector-core-linux-x64-gnu',
+    'arm64': 'ruvector-core-linux-arm64-gnu'
   },
   'darwin': {
-    'x64': '@ruvector/core-darwin-x64',
-    'arm64': '@ruvector/core-darwin-arm64'
+    'x64': 'ruvector-core-darwin-x64',
+    'arm64': 'ruvector-core-darwin-arm64'
   },
   'win32': {
-    'x64': '@ruvector/core-win32-x64'
+    'x64': 'ruvector-core-win32-x64-msvc'
   }
 };
 
@@ -35,7 +35,7 @@ function loadNativeModule() {
       throw new Error(
         `Native module not found for ${platform}-${arch}\n` +
         `Please install: npm install ${platformPackage}\n` +
-        `Or reinstall @ruvector/core to get optional dependencies`
+        `Or reinstall ruvector-core to get optional dependencies`
       );
     }
     throw error;
